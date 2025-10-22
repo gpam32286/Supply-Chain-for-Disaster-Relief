@@ -267,3 +267,341 @@
         )
     )
 )
+
+(define-constant claim-err-unauthorized (err u1001))
+(define-constant claim-err-not-found (err u1002))
+(define-constant claim-err-invalid-supply (err u1003))
+(define-constant claim-err-duplicate (err u1004))
+(define-constant claim-err-invalid-amount (err u1005))
+(define-constant claim-err-invalid-status (err u1006))
+(define-constant claim-err-not-verified (err u1007))
+
+(define-constant claim-status-submitted u1)
+(define-constant claim-status-verified u2)
+(define-constant claim-status-approved u3)
+(define-constant claim-status-rejected u4)
+(define-constant claim-status-cancelled u5)
+
+(define-data-var claim-next-id uint u1)
+
+(define-map claim-claims
+  {id: uint}
+  {
+    supply-id: uint,
+    claimant: principal,
+    reason: (string-utf8 256),
+    claimed-amount: uint,
+    verifier: (optional principal),
+    assessment-notes: (optional (string-utf8 256)),
+    assessment-amount: (optional uint),
+    approved-amount: (optional uint),
+    approver: (optional principal),
+    decision-notes: (optional (string-utf8 256)),
+    status: uint,
+    submitted-at: uint,
+    verified-at: (optional uint),
+    decided-at: (optional uint)
+  }
+)
+
+(define-map claim-supply-open {supply-id: uint} {claim-id: uint})
+(define-map claim-supply-latest {supply-id: uint} {claim-id: uint})
+(define-map claim-verifiers {principal: principal} {enabled: bool})
+(define-map claim-approvers {principal: principal} {enabled: bool})
+(define-map claim-submitters {principal: principal} {enabled: bool})
+
+(define-read-only (claim-is-owner (who principal))
+  (is-eq who contract-owner)
+)
+
+(define-read-only (claim-is-verifier? (who principal))
+  (or (claim-is-owner who) (is-some (map-get? claim-verifiers {principal: who})))
+)
+
+(define-read-only (claim-is-approver? (who principal))
+  (or (claim-is-owner who) (is-some (map-get? claim-approvers {principal: who})))
+)
+
+(define-read-only (claim-is-submitter? (who principal))
+  (or (claim-is-owner who) (is-some (map-get? claim-submitters {principal: who})))
+)
+
+(define-read-only (claim-supply-exists? (supply-id uint))
+  (is-some (map-get? supplies {supply-id: supply-id}))
+)
+
+(define-private (claim-next-id-internal)
+  (let ((id (var-get claim-next-id)))
+    (begin
+      (var-set claim-next-id (+ id u1))
+      id
+    )
+  )
+)
+
+(define-public (claim-add-verifier (who principal))
+  (if (claim-is-owner tx-sender)
+      (begin (map-set claim-verifiers {principal: who} {enabled: true}) (ok true))
+      claim-err-unauthorized
+  )
+)
+
+(define-public (claim-remove-verifier (who principal))
+  (if (claim-is-owner tx-sender)
+      (begin (map-delete claim-verifiers {principal: who}) (ok true))
+      claim-err-unauthorized
+  )
+)
+
+(define-public (claim-add-approver (who principal))
+  (if (claim-is-owner tx-sender)
+      (begin (map-set claim-approvers {principal: who} {enabled: true}) (ok true))
+      claim-err-unauthorized
+  )
+)
+
+(define-public (claim-remove-approver (who principal))
+  (if (claim-is-owner tx-sender)
+      (begin (map-delete claim-approvers {principal: who}) (ok true))
+      claim-err-unauthorized
+  )
+)
+
+(define-public (claim-add-submitter (who principal))
+  (if (claim-is-owner tx-sender)
+      (begin (map-set claim-submitters {principal: who} {enabled: true}) (ok true))
+      claim-err-unauthorized
+  )
+)
+
+(define-public (claim-remove-submitter (who principal))
+  (if (claim-is-owner tx-sender)
+      (begin (map-delete claim-submitters {principal: who}) (ok true))
+      claim-err-unauthorized
+  )
+)
+
+(define-public (claim-submit (supply-id uint) (reason (string-utf8 256)) (amount uint))
+  (begin
+    (if (not (claim-supply-exists? supply-id))
+        claim-err-invalid-supply
+        (if (not (> amount u0))
+            claim-err-invalid-amount
+            (if (not (claim-is-submitter? tx-sender))
+                claim-err-unauthorized
+                (let ((existing (map-get? claim-supply-open {supply-id: supply-id})))
+                  (if (is-some existing)
+                      claim-err-duplicate
+                      (let ((id (claim-next-id-internal)))
+                        (begin
+                          (map-set claim-claims {id: id}
+                            {
+                              supply-id: supply-id,
+                              claimant: tx-sender,
+                              reason: reason,
+                              claimed-amount: amount,
+                              verifier: none,
+                              assessment-notes: none,
+                              assessment-amount: none,
+                              approved-amount: none,
+                              approver: none,
+                              decision-notes: none,
+                              status: claim-status-submitted,
+                              submitted-at: burn-block-height,
+                              verified-at: none,
+                              decided-at: none
+                            }
+                          )
+                          (map-set claim-supply-open {supply-id: supply-id} {claim-id: id})
+                          (map-set claim-supply-latest {supply-id: supply-id} {claim-id: id})
+                          (print {event: "claim_submitted", claim_id: id, supply_id: supply-id, amount: amount, by: tx-sender, at: burn-block-height})
+                          (ok id)
+                        )
+                      )
+                  )
+                )
+            )
+        )
+    )
+  )
+)
+
+(define-public (claim-verify (claim-id uint) (notes (string-utf8 256)) (assessed-amount (optional uint)))
+  (begin
+    (if (not (claim-is-verifier? tx-sender))
+        claim-err-unauthorized
+        (match (map-get? claim-claims {id: claim-id})
+          claim
+          (if (is-eq (get status claim) claim-status-submitted)
+              (begin
+                (map-set claim-claims {id: claim-id}
+                  {
+                    supply-id: (get supply-id claim),
+                    claimant: (get claimant claim),
+                    reason: (get reason claim),
+                    claimed-amount: (get claimed-amount claim),
+                    verifier: (some tx-sender),
+                    assessment-notes: (some notes),
+                    assessment-amount: assessed-amount,
+                    approved-amount: (get approved-amount claim),
+                    approver: (get approver claim),
+                    decision-notes: (get decision-notes claim),
+                    status: claim-status-verified,
+                    submitted-at: (get submitted-at claim),
+                    verified-at: (some burn-block-height),
+                    decided-at: (get decided-at claim)
+                  }
+                )
+                (print {event: "claim_verified", claim_id: claim-id, by: tx-sender, at: burn-block-height})
+                (ok true)
+              )
+              claim-err-invalid-status
+          )
+          claim-err-not-found
+        )
+    )
+  )
+)
+
+(define-public (claim-approve (claim-id uint) (approved-amount uint) (notes (string-utf8 256)))
+  (begin
+    (if (not (claim-is-approver? tx-sender))
+        claim-err-unauthorized
+        (match (map-get? claim-claims {id: claim-id})
+          claim
+          (if (is-eq (get status claim) claim-status-verified)
+              (if (> approved-amount (get claimed-amount claim))
+                  claim-err-invalid-amount
+                  (begin
+                    (map-set claim-claims {id: claim-id}
+                      {
+                        supply-id: (get supply-id claim),
+                        claimant: (get claimant claim),
+                        reason: (get reason claim),
+                        claimed-amount: (get claimed-amount claim),
+                        verifier: (get verifier claim),
+                        assessment-notes: (get assessment-notes claim),
+                        assessment-amount: (get assessment-amount claim),
+                        approved-amount: (some approved-amount),
+                        approver: (some tx-sender),
+                        decision-notes: (some notes),
+                        status: claim-status-approved,
+                        submitted-at: (get submitted-at claim),
+                        verified-at: (get verified-at claim),
+                        decided-at: (some burn-block-height)
+                      }
+                    )
+                    (let ((sid (get supply-id claim)))
+                      (begin
+                        (map-delete claim-supply-open {supply-id: sid})
+                        (print {event: "claim_approved", claim_id: claim-id, supply_id: sid, amount: approved-amount, by: tx-sender, at: burn-block-height})
+                        (ok true)
+                      )
+                    )
+                  )
+              )
+              claim-err-not-verified
+          )
+          claim-err-not-found
+        )
+    )
+  )
+)
+
+(define-public (claim-reject (claim-id uint) (notes (string-utf8 256)))
+  (begin
+    (if (not (claim-is-approver? tx-sender))
+        claim-err-unauthorized
+        (match (map-get? claim-claims {id: claim-id})
+          claim
+          (if (is-eq (get status claim) claim-status-verified)
+              (begin
+                (map-set claim-claims {id: claim-id}
+                  {
+                    supply-id: (get supply-id claim),
+                    claimant: (get claimant claim),
+                    reason: (get reason claim),
+                    claimed-amount: (get claimed-amount claim),
+                    verifier: (get verifier claim),
+                    assessment-notes: (get assessment-notes claim),
+                    assessment-amount: (get assessment-amount claim),
+                    approved-amount: none,
+                    approver: (some tx-sender),
+                    decision-notes: (some notes),
+                    status: claim-status-rejected,
+                    submitted-at: (get submitted-at claim),
+                    verified-at: (get verified-at claim),
+                    decided-at: (some burn-block-height)
+                  }
+                )
+                (let ((sid (get supply-id claim)))
+                  (begin
+                    (map-delete claim-supply-open {supply-id: sid})
+                    (print {event: "claim_rejected", claim_id: claim-id, supply_id: sid, by: tx-sender, at: burn-block-height})
+                    (ok true)
+                  )
+                )
+              )
+              claim-err-not-verified
+          )
+          claim-err-not-found
+        )
+    )
+  )
+)
+
+(define-public (claim-cancel (claim-id uint))
+  (match (map-get? claim-claims {id: claim-id})
+    claim
+    (if (and (is-eq (get status claim) claim-status-submitted) (is-eq (get claimant claim) tx-sender))
+        (begin
+          (map-set claim-claims {id: claim-id}
+            {
+              supply-id: (get supply-id claim),
+              claimant: (get claimant claim),
+              reason: (get reason claim),
+              claimed-amount: (get claimed-amount claim),
+              verifier: (get verifier claim),
+              assessment-notes: (get assessment-notes claim),
+              assessment-amount: (get assessment-amount claim),
+              approved-amount: (get approved-amount claim),
+              approver: (get approver claim),
+              decision-notes: (get decision-notes claim),
+              status: claim-status-cancelled,
+              submitted-at: (get submitted-at claim),
+              verified-at: (get verified-at claim),
+              decided-at: (some burn-block-height)
+            }
+          )
+          (let ((sid (get supply-id claim)))
+            (begin
+              (map-delete claim-supply-open {supply-id: sid})
+              (print {event: "claim_cancelled", claim_id: claim-id, supply_id: sid, by: tx-sender, at: burn-block-height})
+              (ok true)
+            )
+          )
+        )
+        claim-err-invalid-status
+    )
+    claim-err-not-found
+  )
+)
+
+(define-read-only (claim-get (claim-id uint))
+  (map-get? claim-claims {id: claim-id})
+)
+
+(define-read-only (claim-get-status (claim-id uint))
+  (match (map-get? claim-claims {id: claim-id})
+    claim (ok (get status claim))
+    claim-err-not-found
+  )
+)
+
+(define-read-only (claim-get-open-by-supply (supply-id uint))
+  (map-get? claim-supply-open {supply-id: supply-id})
+)
+
+(define-read-only (claim-get-latest-by-supply (supply-id uint))
+  (map-get? claim-supply-latest {supply-id: supply-id})
+)
