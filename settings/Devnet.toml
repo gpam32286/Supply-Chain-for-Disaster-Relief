@@ -1,0 +1,8 @@
+[network]
+name = "devnet"
+description = ""
+
+[contracts.Relief]
+path = "contracts/Relief.clar"
+clarity_version = 3
+epoch = "latest"
